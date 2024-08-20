@@ -36,106 +36,84 @@ def load_data():
 data = load_data()
 
 class TradeSystem():
-    def __init__(self, investment, data, start_date, end_date, model=None, in_fund=True, cash=0, returns=0):
+    def __init__(self, investment, data, start_date, end_date, window=7, model=None, in_fund=True, returns=0):
         self.investment = investment
         self.data = data
         self.start_date, self.end_date = start_date, end_date
-        self.current_port_date, self.current_date = start_date, start_date
+        self.current_date = start_date
 
+        # Для простоты расчёта инициируем стоимость портфеля с закрытия
         self.portfolio = pd.DataFrame(index=[start_date]
-                                      , data={'Close_Port': float(investment)
-                                              # Для простоты расчёта инециируем стоимость портфеля с закрытия.
-                , 'Returns': float(returns)
-                , 'Sharpe_Ratio': float(0)
-                , 'Cash': float(cash)})
+                                      ,data={'Close_Port': float(investment)
+                                            ,'Returns': float(returns)
+                                            ,'Sharpe_Ratio': float(0)
+                                            ,'Trade_ind': 0})
 
-        # self.portfolio_years = self.get_portfolio_years() -- необходимо написать геттеры и сеттеры
-        # self.total_return = self.get_total_return()
-        # self.cagr = self.get_cagr()
-
-        self.no_trade_days = 8
-        self.trade_result = None
+        self.no_trade_days, self.window = 8, window
         self.in_fund = in_fund
         self.model = model
 
 
     def start_trade(self):
         while self.current_date < self.end_date:
-            date = self.current_date + timedelta(days=1)
-            if date in self.data.index:  # Когда расчётный день - торговый
-                self.calculate_daily_result(date)
+            self.current_date += timedelta(days=1)
+            if self.current_date in self.data.index:        # Когда расчётный день - торговый
+                self.calculate_daily_result(self.current_date)
                 self.trade()
 
-            self.current_date = date
 
 
     def calculate_daily_result(self, date):
         data_row = self.data.loc[date]
-        self.current_port_date = date
-        if self.no_trade_days > 0 and self.in_fund:  # Когда не было операций с портфелем на прошлый день
-            new_port_row = self.portfolio.iloc[-1].copy()
-            new_port_row['Close_Port'] = new_port_row['Close_Port'] * (1 + data_row['Returns']) + \
-                                         self.data.shift(1)['Dividends'].loc[date]
+        new_port_row = self.portfolio.iloc[-1].copy()
+        dividends = self.data.shift(1)['Dividends'].loc[date]
+
+        if self.no_trade_days > 0 and self.in_fund:     # Не было операций и деньги в фонде
+            new_port_row['Close_Port'] = new_port_row['Close_Port'] * (1 + data_row['Returns']) + dividends
             new_port_row['Returns'] = (new_port_row['Close_Port'] / self.portfolio.iloc[-1]['Close_Port']) - 1
+            new_port_row['Trade_ind'] = 0
             new_port_row.name = date
             self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
 
-        elif self.no_trade_days > 0 and not self.in_fund:  # Когда не было операций с портфелем на прошлый день
-            new_port_row = self.portfolio.iloc[-1].copy()
+        elif self.no_trade_days > 0 and not self.in_fund:   # Не было операций и деньги в кэше
+            new_port_row['Trade_ind'] = 0
             new_port_row.name = date
-
             self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
 
-        else:  # Когда были опирации с портфелем на прошлый день
-            new_port_row = self.trade_result
-            if not self.in_fund:
-                new_port_row['Cash'] = new_port_row['Cash'] + self.data.shift(1)['Dividends'].loc[date]
-                new_port_row['Returns'] = (new_port_row['Cash'] / self.portfolio.iloc[-1]['Close_Port']) - 1
-                new_port_row.name = date
+        elif not self.in_fund:      # Когда была продажа
+            new_port_row['Close_Port'] = new_port_row['Close_Port'] + dividends
+            new_port_row['Returns'] = (new_port_row['Close_Port'] / self.portfolio.iloc[-1]['Close_Port']) - 1
+            new_port_row['Trade_ind'] = 1
+            new_port_row.name = date
+            self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
 
-                self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
+        elif self.in_fund:      # Когда была покупка
+            new_port_row['Trade_ind'] = 1
+            new_port_row.name = date
+            self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
 
-            elif self.in_fund:
-                new_port_row['Close_Port'] = new_port_row['Close_Port'] + self.data.shift(1)['Dividends'].loc[date]
-                new_port_row['Returns'] = (new_port_row['Close_Port'] / self.portfolio.iloc[-1]['Cash']) - 1
-                new_port_row.name = date
-
-                self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
 
 
     def trade(self, percent_change=0.05):
         if self.no_trade_days > 7:
-            dt = self.current_port_date
+            dt = self.current_date
             current_close = self.data.loc[dt]['Close']
             # next_week_max_close = self.data.loc[dt:dt + timedelta(days=8)]['Close'].max()
             # next_week_min_close = self.data.loc[dt:dt + timedelta(days=8)]['Close'].min()
-            next_week_mean_close = self.data.loc[dt:dt + timedelta(days=8)]['Close'].mean()
+            next_week_mean_close = self.data.loc[dt:dt + timedelta(days=self.window + 1)]['Close'].mean()
 
             if (next_week_mean_close / current_close) - 1 > percent_change and not self.in_fund:
-                self.trade_buy()
+                self.in_fund = True
                 self.no_trade_days = 0
 
             elif (next_week_mean_close / current_close) - 1 < -percent_change and self.in_fund:
-                self.trade_sell()
+                self.in_fund = False
                 self.no_trade_days = 0
 
             else:
                 self.no_trade_days += 1
         else:
             self.no_trade_days += 1
-
-
-    def trade_buy(self):
-        trade_row = self.portfolio.iloc[-1].copy()
-        trade_row['Close_Port'], trade_row['Cash'] = trade_row['Cash'], trade_row['Close_Port']
-        self.trade_result, self.in_fund = trade_row, True
-
-
-    def trade_sell(self):
-        trade_row = self.portfolio.iloc[-1].copy()
-        trade_row['Close_Port'], trade_row['Cash'] = trade_row['Cash'], trade_row['Close_Port']
-        self.trade_result, self.in_fund = trade_row, False
-
 
 
     def calculate_sharpe_ratio(self):
@@ -188,10 +166,13 @@ class TradeSystem():
         plt.ylabel('Port Cost')
 
 
-TS = TradeSystem(1000, data, datetime(1986, 1, 2), datetime(2000, 11, 21))  # Не принимает значение меньшее или равное первой дате в данных
+TS = TradeSystem(1000, data, datetime(1986, 1, 2), datetime(2000, 11, 21), window=5)  # Не принимает значение меньшее или равное первой дате в данных
 TS.start_trade()
 print(TS.portfolio)
 
-print(TS.get_cagr())
-print(TS.calculate_sharpe_ratio())
-print(TS.portfolio['Cash'].mean())
+print('Window:', TS.window)
+print('CAGR:', TS.get_cagr())
+print('SHARP:', TS.calculate_sharpe_ratio())
+print('Total returns:', TS.get_total_return())
+print('Count trades:', TS.portfolio['Trade_ind'].sum())
+print('Current state in fund:', TS.in_fund)
