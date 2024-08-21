@@ -37,7 +37,7 @@ def load_data():
 data = load_data()
 
 class TradeSystem():
-    def __init__(self, investment, data, start_date, end_date, trade_window=7, coef_window=252, model=None, in_fund=True, returns=0):
+    def __init__(self, investment, data, start_date, end_date, trade_window=7, coef_window=0, model=None, in_fund=True, returns=0):
         # use ceof_window=0 if you want to calculate coefficient by the whole DF
         self.investment = investment
         self.data = data
@@ -68,7 +68,7 @@ class TradeSystem():
     def calculate_daily_result(self, date):
         data_row = self.data.loc[date]
         new_port_row = self.portfolio.iloc[-1].copy()
-        dividends = self.data.shift(1)['Dividends'].loc[date]
+        dividends = new_port_row['Close_Port'] / self.data.shift(1)['Close'].loc[date] * self.data.shift(1)['Dividends'].loc[date]
 
         if self.no_trade_days > 0 and self.in_fund:     # Не было операций и деньги в фонде
             new_port_row['Close_Port'] = new_port_row['Close_Port'] * (1 + data_row['Returns']) + dividends
@@ -123,14 +123,14 @@ class TradeSystem():
             portfolio = self.portfolio
         wind = self.coef_window
 
-        average_returns = portfolio.iloc[-wind:]['Returns'].mean()
-        std_returns = portfolio.iloc[-wind:]['Returns'].std()
-        risk_free_rate = self.data.loc[portfolio.iloc[-1].name, 'DGS10'] / 252
+        average_returns = portfolio.iloc[-wind:]['Returns'].mean() * 252
+        std_dev = portfolio.iloc[-wind:]['Returns'].std() * np.sqrt(252)
+        risk_free_rate = self.data.iloc[-wind:]['DGS10'].mean()     # Не правильно считает для окна с енд меньше чем в data
 
-        return (average_returns - risk_free_rate) / std_returns
+        return (average_returns - risk_free_rate) / std_dev
 
 
-    def calculate_cagr_ratio(self, portfolio=None):
+    def calculate_cagr(self, portfolio=None):
         if portfolio is None:
             portfolio = self.portfolio
         elif 'Close_Port' not in portfolio.columns:
@@ -173,17 +173,17 @@ class TradeSystem():
 
 # data = data.loc[datetime(1986, 1, 2):datetime(1996, 11, 22)]
 
-TS = TradeSystem(1000, data, datetime(1986, 1, 2), datetime(2000, 11, 21), trade_window=100, coef_window=252 * 10)  # Не принимает значение меньшее или равное первой дате в данных
+TS = TradeSystem(100, data, datetime(1986, 1, 2), datetime(1986, 1, 22), trade_window=0)  # Не принимает значение меньшее или равное первой дате в данных
 TS.start_trade()
 print(TS.portfolio)
 
 print('Trade window:', TS.trade_window)
 print('Coeficient window:', TS.coef_window)
-print('CAGR:', TS.calculate_cagr_ratio())
-print('SHARP:', TS.calculate_sharpe_ratio())
+print('CAGR:', TS.calculate_cagr())
+# print('SHARP:', TS.calculate_sharpe_ratio())
 print('Total returns:', TS.get_total_return())
 print('Count trades:', TS.portfolio['Trade_ind'].sum())
 print('Current state in fund:', TS.in_fund)
 
 
-# print(TS.calculate_sharpe_ratio(data))
+print(TS.calculate_sharpe_ratio(data))
