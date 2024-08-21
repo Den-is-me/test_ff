@@ -25,6 +25,7 @@ def load_data():
 
     data = pd.merge(data, merge_df.drop('Bonds_income', axis=1), how='left', on='Date')
     data['DGS10'] = data['DGS10'].ffill()
+    data['DGS10'] = data['DGS10'] / 100
     data['Returns'] = ((data['Close'] + data['Dividends'].shift(1)) / data['Close'].shift(1)) - 1
 
     data.index = data.Date
@@ -36,22 +37,24 @@ def load_data():
 data = load_data()
 
 class TradeSystem():
-    def __init__(self, investment, data, start_date, end_date, window=7, model=None, in_fund=True, returns=0):
+    def __init__(self, investment, data, start_date, end_date, trade_window=7, coef_window=252, model=None, in_fund=True, returns=0):
+        # use ceof_window=0 if you want to calculate coefficient by the whole DF
         self.investment = investment
         self.data = data
         self.start_date, self.end_date = start_date, end_date
         self.current_date = start_date
 
         # Для простоты расчёта инициируем стоимость портфеля с закрытия
-        self.portfolio = pd.DataFrame(index=[start_date]
+        self.portfolio = pd.DataFrame(index={'Date': [start_date]}
                                       ,data={'Close_Port': float(investment)
                                             ,'Returns': float(returns)
                                             ,'Sharpe_Ratio': float(0)
                                             ,'Trade_ind': 0})
 
-        self.no_trade_days, self.window = 8, window
+        self.no_trade_days, self.trade_window = 8, trade_window
         self.in_fund = in_fund
         self.model = model
+        self.coef_window = coef_window
 
 
     def start_trade(self):
@@ -60,7 +63,6 @@ class TradeSystem():
             if self.current_date in self.data.index:        # Когда расчётный день - торговый
                 self.calculate_daily_result(self.current_date)
                 self.trade()
-
 
 
     def calculate_daily_result(self, date):
@@ -93,14 +95,14 @@ class TradeSystem():
             self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
 
 
-
     def trade(self, percent_change=0.05):
+        # Для упрощения расчётов используем 100% распределение между фондом и кэшем.
         if self.no_trade_days > 7:
             dt = self.current_date
             current_close = self.data.loc[dt]['Close']
             # next_week_max_close = self.data.loc[dt:dt + timedelta(days=8)]['Close'].max()
             # next_week_min_close = self.data.loc[dt:dt + timedelta(days=8)]['Close'].min()
-            next_week_mean_close = self.data.loc[dt:dt + timedelta(days=self.window + 1)]['Close'].mean()
+            next_week_mean_close = self.data.loc[dt:dt + timedelta(days=self.trade_window + 1)]['Close'].mean()
 
             if (next_week_mean_close / current_close) - 1 > percent_change and not self.in_fund:
                 self.in_fund = True
@@ -116,37 +118,41 @@ class TradeSystem():
             self.no_trade_days += 1
 
 
-    def calculate_sharpe_ratio(self):
-        average_returns = self.get_average_returns()
-        volatility = self.get_volatility()
-        risk_free_rate = self.data.loc[self.portfolio.iloc[-1].name, 'DGS10']
+    def calculate_sharpe_ratio(self, portfolio=None):
+        if portfolio is None:
+            portfolio = self.portfolio
+        wind = self.coef_window
 
-        return (average_returns - risk_free_rate) / volatility
+        average_returns = portfolio.iloc[-wind:]['Returns'].mean()
+        std_returns = portfolio.iloc[-wind:]['Returns'].std()
+        risk_free_rate = self.data.loc[portfolio.iloc[-1].name, 'DGS10'] / 252
+
+        return (average_returns - risk_free_rate) / std_returns
 
 
-    def get_volatility(self):
-        return np.std(self.portfolio['Returns']) * np.sqrt(252)
+    def calculate_cagr_ratio(self, portfolio=None):
+        if portfolio is None:
+            portfolio = self.portfolio
+        elif 'Close_Port' not in portfolio.columns:
+            portfolio['Close_Port'] = portfolio['Close']
+        wind = self.coef_window
+
+        portfolio_years = len(portfolio[-wind:]) / 252
+
+        return (1 + self.get_total_return(portfolio)) ** (1 / portfolio_years) - 1
 
 
-    def get_total_return(self):
-        initial_value = self.portfolio['Close_Port'].iloc[0]
-        final_value = self.portfolio['Close_Port'].iloc[-1]
+    def get_total_return(self, portfolio=None):
+        if portfolio is None:
+            portfolio = self.portfolio
+        elif 'Close_Port' not in portfolio.columns:
+            portfolio['Close_Port'] = portfolio['Close']
+        wind = self.coef_window
+
+        initial_value = portfolio['Close_Port'].iloc[-wind]
+        final_value = portfolio['Close_Port'].iloc[-1]
 
         return (final_value / initial_value) - 1
-
-
-    def get_cagr(self):
-        portfolio_years = self.get_portfolio_years()
-        return (1 + self.get_total_return()) ** (1 / portfolio_years) - 1
-
-
-    def get_average_returns(self):
-        portfolio_years = self.get_portfolio_years()
-        return self.get_total_return() / portfolio_years
-
-
-    def get_portfolio_years(self):
-        return len(self.portfolio) / 252
 
 
     def plt(self, start_year=None, end_year=None):
@@ -155,24 +161,29 @@ class TradeSystem():
         else:
             start_year = datetime(start_year, 1, 1)
         if end_year is None:
-            end_yaer = self.portfolio.iloc[-1].name
+            end_year = self.portfolio.iloc[-1].name
         else:
             end_year = datetime(end_year, 1, 1)
 
-        plt.figure(figsize=(12, 6), dpi=200)
+        plt.figure(figsize=(12, 6), dpi=200)        # Добавить график close fund и точки трейда
         sns.lineplot(data=self.portfolio, x=self.portfolio.index, y='Close_Port')
         plt.xlim((start_year, (end_year)))
         plt.xlabel('Date')
         plt.ylabel('Port Cost')
 
+# data = data.loc[datetime(1986, 1, 2):datetime(1996, 11, 22)]
 
-TS = TradeSystem(1000, data, datetime(1986, 1, 2), datetime(2000, 11, 21), window=5)  # Не принимает значение меньшее или равное первой дате в данных
+TS = TradeSystem(1000, data, datetime(1986, 1, 2), datetime(2000, 11, 21), trade_window=100, coef_window=252 * 10)  # Не принимает значение меньшее или равное первой дате в данных
 TS.start_trade()
 print(TS.portfolio)
 
-print('Window:', TS.window)
-print('CAGR:', TS.get_cagr())
+print('Trade window:', TS.trade_window)
+print('Coeficient window:', TS.coef_window)
+print('CAGR:', TS.calculate_cagr_ratio())
 print('SHARP:', TS.calculate_sharpe_ratio())
 print('Total returns:', TS.get_total_return())
 print('Count trades:', TS.portfolio['Trade_ind'].sum())
 print('Current state in fund:', TS.in_fund)
+
+
+# print(TS.calculate_sharpe_ratio(data))
