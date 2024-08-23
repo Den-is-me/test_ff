@@ -86,9 +86,10 @@ class TradeSystem():
 
     def calculate_daily_result(self, date):
         data_row = self.data.loc[date]
+        prev_data_row = self.data.shift(1)
         new_port_row = self.portfolio.iloc[-1].copy()
-        dividends = new_port_row['Close_Port'] / self.data.shift(1)['Close'].loc[date] * \
-                    self.data.shift(1)['Dividends'].loc[date]
+        dividends = new_port_row['Close_Port'] / (prev_data_row.loc[date]['Close'] if pd.notnull(prev_data_row['Close'].loc[date]) else 1) * \
+                    (prev_data_row['Dividends'].loc[date] if pd.notnull(prev_data_row['Dividends'].loc[date]) else 0)
 
         if self.no_trade_days > 0 and self.in_fund:  # Не было операций и деньги в фонде
             new_port_row['Close_Port'] = new_port_row['Close_Port'] * (1 + data_row['Returns']) + dividends
@@ -212,10 +213,25 @@ class TradeSystem():
         # plt.show()
 
 
+data = load_data()
+
 # TS = TradeSystem(100, data, datetime(1986, 1, 2), datetime(2021, 1, 22))
 # TS.start_trade()
 # print(TS.portfolio)
 # TS.plt()
 
-a = [(1, 5, 3), (2, 2, 4), (1, 5, 1)]
-print(sorted(a, key=lambda x: (x[-2], x[0])))
+# print(TS.calculate_sharpe_ratio())
+#
+#
+train_df = data.copy().loc[datetime(1996, 1, 1):datetime(2016, 1, 1)]
+test_df_flat = data.copy().loc[:datetime(1996, 1, 1)]
+test_df_bull = data.copy().loc[datetime(2016, 1, 1):]
+
+
+start_date = datetime(1996, 1, 1)
+end_date = datetime(2022, 1, 22)
+
+TS = TradeSystem(10, train_df, start_date, end_date)
+TS.start_trade()
+
+print(TS.portfolio)
