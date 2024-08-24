@@ -34,7 +34,6 @@ def load_data():
 
     return data
 
-
 class TradeSystem():
     def __init__(self
                  , investment  # Размер первоначального капитала
@@ -46,8 +45,9 @@ class TradeSystem():
                  , SMA_long_window=100  # Размер окна для длинной скользящей
                  , coef_window=0  # Количество дней за которые расчитывать коэффиценты Sharpe, CAGR
                  , trade_needed=True  # Совершать операции или выбрать стратегию Buy and Hold
-                 , model=None  # Модель для определения решения о покупке, продаже (можно улучшить)
-                 , in_fund=True  # Индикатор того что капитал в Фонде
+                 , model=None  # Модель для определения решения о покупке, продаже (можно улучшить).
+                 , in_fund=True  # Индикатор того что капитал в Фонде.
+                 , trade_year_coef=0.0002  # Коэффициент умножения на SMA в случае если мы не торговали в течении года.
                  ):
 
         # use ceof_window=0 if you want to calculate coefficient by the whole DF
@@ -58,22 +58,23 @@ class TradeSystem():
 
         # Для простоты расчёта инициируем стоимость портфеля с закрытия
         self.portfolio = pd.DataFrame(index=[start_date]
-                                    ,data={'Close_Port': float(investment)
-                                    ,'Returns': float(0)
-                                    ,'Sharpe_Ratio': float(0)
-                                    ,'Trade_ind': 0})
+                                      , data={'Close_Port': float(investment)
+                , 'Returns': float(0)
+                , 'Sharpe_Ratio': float(0)
+                , 'Trade_ind': 0})
 
         # exit_coef - коэфициент выхода из фонда, увеличивается по мере приближения к end_date
-        self.no_trade_days, self.exit_coef, self.trade_needed = 8, 1, trade_needed
+        self.trade_year_coef, self.year_current, self.exit_coef = trade_year_coef, 1, 1
+        self.no_trade_days, self.trade_needed = 8, trade_needed
         self.SMA_target = SMA_target
         self.data[f'Short_SMA_{SMA_target}'] = self.data[SMA_target].rolling(SMA_short_window).mean()
         self.data[f'Long_SMA_{SMA_target}'] = self.data[SMA_target].rolling(SMA_long_window).mean()
         self.data['Long_SMA_Close'] = self.data['Close'].rolling(SMA_long_window).mean()
-        self.short_up = not in_fund
+        self.short_up = data.loc[start_date][f'Short_SMA_{SMA_target}'] > data.loc[start_date][f'Long_SMA_{SMA_target}']
+        # Не принемает старт дейт который отсутсвует в data нужно инициировать с торгового дня (можно улучшить)
         self.in_fund = in_fund
         self.model = model
         self.coef_window = coef_window
-
 
     def start_trade(self):
         while self.current_date < self.end_date:
@@ -83,13 +84,14 @@ class TradeSystem():
                 if self.trade_needed:
                     self.trade()
 
-
     def calculate_daily_result(self, date):
         data_row = self.data.loc[date]
         prev_data_row = self.data.shift(1)
         new_port_row = self.portfolio.iloc[-1].copy()
-        dividends = new_port_row['Close_Port'] / (prev_data_row.loc[date]['Close'] if pd.notnull(prev_data_row['Close'].loc[date]) else 1) * \
-                    (prev_data_row['Dividends'].loc[date] if pd.notnull(prev_data_row['Dividends'].loc[date]) else 0)
+        dividends = new_port_row['Close_Port'] / (
+            prev_data_row.loc[date]['Close'] if pd.notnull(prev_data_row['Close'].loc[date]) else 1) * \
+                    (prev_data_row['Dividends'].loc[date] if pd.notnull(
+                        prev_data_row['Dividends'].loc[date]) else 0)
 
         if self.no_trade_days > 0 and self.in_fund:  # Не было операций и деньги в фонде
             new_port_row['Close_Port'] = new_port_row['Close_Port'] * (1 + data_row['Returns']) + dividends
@@ -115,16 +117,22 @@ class TradeSystem():
             new_port_row.name = date
             self.portfolio = pd.concat([self.portfolio, new_port_row.to_frame().T])
 
-
     def trade(self):
         # Для упрощения расчётов используем 100% распределение между фондом и кэшем.
         if self.no_trade_days > 7:
             dt = self.current_date
             if (self.end_date - dt).days < 30:  # Увеличиваем коэффициент выхода из фонда
-                self.exit_coef += 0.05
+                self.exit_coef += 0.01
+            if 252 - self.no_trade_days < 60:
+                self.year_current += self.trade_year_coef
+            else:
+                self.year_current = 1
 
             shrt_sma = self.data.at[dt, f'Short_SMA_{self.SMA_target}'] * self.exit_coef
             lng_sma = self.data.at[dt, f'Long_SMA_{self.SMA_target}']
+
+            shrt_sma = shrt_sma * (self.year_current if not self.short_up else 1)
+            lng_sma = lng_sma * (self.year_current if self.short_up else 1)
 
             if not self.short_up and shrt_sma > lng_sma and self.in_fund:  # Sell
                 self.in_fund = False
@@ -142,7 +150,6 @@ class TradeSystem():
         else:
             self.no_trade_days += 1
 
-
     def calculate_sharpe_ratio(self, portfolio=None):
         if portfolio is None:
             portfolio = self.portfolio
@@ -150,35 +157,32 @@ class TradeSystem():
 
         average_returns = portfolio.iloc[-wind:]['Returns'].mean() * 252
         std_dev = portfolio.iloc[-wind:]['Returns'].std() * np.sqrt(252)
-        risk_free_rate = self.data.iloc[-wind:]['DGS10'].mean()  # Не правильно считает для окна с енд меньше чем в data
+        risk_free_rate = self.data.loc[self.start_date:self.end_date]['DGS10'].iloc[-wind:].mean()
 
         return (average_returns - risk_free_rate) / std_dev
-
 
     def calculate_cagr(self, portfolio=None):
         if portfolio is None:
             portfolio = self.portfolio
         elif 'Close_Port' not in portfolio.columns:
-            portfolio['Close_Port'] = portfolio['Close']
+            portfolio.loc[:, 'Close_Port'] = portfolio['Close']
         wind = self.coef_window
 
         portfolio_years = len(portfolio[-wind:]) / 252
 
         return (1 + self.get_total_return(portfolio)) ** (1 / portfolio_years) - 1
 
-
     def get_total_return(self, portfolio=None):
         if portfolio is None:
             portfolio = self.portfolio
         elif 'Close_Port' not in portfolio.columns:
-            portfolio['Close_Port'] = portfolio['Close']
+            portfolio.loc['Close_Port'] = portfolio['Close']
         wind = self.coef_window
 
         initial_value = portfolio['Close_Port'].iloc[-wind]
         final_value = portfolio['Close_Port'].iloc[-1]
 
         return (final_value / initial_value) - 1
-
 
     def plt(self, start_year=None, end_year=None):
         if start_year is None:
@@ -190,22 +194,30 @@ class TradeSystem():
         else:
             end_year = datetime(end_year, 1, 1)
 
-        data = self.data.loc[start_year:end_year]
-        print('CAGR:', self.calculate_cagr())
-        print('SHARP:', self.calculate_sharpe_ratio())
-        print('Total returns:', self.get_total_return())
+        data = self.data.loc[start_year:end_year + timedelta(days=1)]
+        # data_cagr = self.calculate_cagr(data)
+        # data_sharpe = self.calculate_sharpe_ratio(data)
+
+        print('CAGR Trade System:', self.calculate_cagr())
+        print('SHARP Trade System:', self.calculate_sharpe_ratio())
+        print('Total Trade System returns:', self.get_total_return())
         print('Count trades:', self.portfolio.loc[self.portfolio['Trade_ind'] != 0]['Trade_ind'].count())
         print('Current state in cash:', not self.in_fund)
-
+        # print()
+        # print('CAGR Fund without div:', data_cagr)
+        # print('Sharpe with div:', data_sharpe)
 
         plt.figure(figsize=(12, 6), dpi=200)
         signal_bye_df = self.portfolio.loc[self.portfolio['Trade_ind'] == 1]
         signal_sell_df = self.portfolio.loc[self.portfolio['Trade_ind'] == 2]
 
-        sns.lineplot(data=self.portfolio, x=self.portfolio.index, y='Close_Port', alpha=0.8, label='Portfolio Close')
+        sns.lineplot(data=self.portfolio, x=self.portfolio.index, y='Close_Port', alpha=0.8,
+                     label='Portfolio Close')
         sns.lineplot(data=data, x=data.index, y=data['Close'], alpha=0.4, label='Fund Close')
-        sns.scatterplot(data=signal_bye_df, x=signal_bye_df.index, y='Close_Port', color='green', label='Buy', s=60, marker='^')
-        sns.scatterplot(data=signal_sell_df, x=signal_sell_df.index, y='Close_Port', color='red', label='Sell', s=60, marker='v')
+        sns.scatterplot(data=signal_bye_df, x=signal_bye_df.index, y='Close_Port', color='green', label='Buy', s=60,
+                        marker='^')
+        sns.scatterplot(data=signal_sell_df, x=signal_sell_df.index, y='Close_Port', color='red', label='Sell',
+                        s=60, marker='v')
         plt.xlabel('Date')
         plt.ylabel('Close Price')
 
@@ -213,25 +225,19 @@ class TradeSystem():
         # plt.show()
 
 
+
+
 data = load_data()
 
-# TS = TradeSystem(100, data, datetime(1986, 1, 2), datetime(2021, 1, 22))
-# TS.start_trade()
-# print(TS.portfolio)
-# TS.plt()
 
-# print(TS.calculate_sharpe_ratio())
-#
-#
+
+
 train_df = data.copy().loc[datetime(1996, 1, 1):datetime(2016, 1, 1)]
-test_df_flat = data.copy().loc[:datetime(1996, 1, 1)]
-test_df_bull = data.copy().loc[datetime(2016, 1, 1):]
+start_date = train_df.iloc[0].name
+end_date = train_df.iloc[-1].name
+start_investment = train_df.iloc[0]['Close']
 
-
-start_date = datetime(1996, 1, 1)
-end_date = datetime(2022, 1, 22)
-
-TS = TradeSystem(10, train_df, start_date, end_date)
+TS = TradeSystem(start_investment, data, start_date, end_date, SMA_long_window=500, SMA_short_window=200, trade_year_coef=0.05)
 TS.start_trade()
 
-print(TS.portfolio)
+TS.plt()
